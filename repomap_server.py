@@ -13,17 +13,67 @@ from utils import count_tokens, read_text
 from scm import get_scm_fname
 from importance import filter_important_files
 
-# Helper function from your CLI, useful to have here
-def find_src_files(directory: str) -> List[str]:
+# Enhanced file filtering with configurable patterns
+def find_src_files(directory: str, file_patterns: Optional[List[str]] = None) -> List[str]:
+    """Find source files in a directory with proper filtering.
+    
+    Args:
+        directory: Directory to search
+        file_patterns: List of file extensions to include (e.g., ['.py', '.js'])
+                     If None, uses default source code extensions
+    """
     if not os.path.isdir(directory):
-        return [directory] if os.path.isfile(directory) else []
+        if os.path.isfile(directory) and is_source_file(directory, file_patterns):
+            return [directory]
+        return []
+    
+    # Default source code extensions
+    default_extensions = {'.py', '.js', '.ts', '.java', '.c', '.cpp', '.h', '.hpp',
+                         '.go', '.rs', '.rb', '.php', '.swift', '.scala', '.kt'}
+    
+    # Use provided patterns or default to source extensions
+    if file_patterns:
+        extensions = {ext.lower() for ext in file_patterns if ext.startswith('.')}
+    else:
+        extensions = default_extensions
+    
     src_files = []
-    for r, d, f_list in os.walk(directory):
-        d[:] = [d_name for d_name in d if not d_name.startswith('.') and d_name not in {'node_modules', '__pycache__', 'venv', 'env'}]
-        for f in f_list:
-            if not f.startswith('.'):
-                src_files.append(os.path.join(r, f))
+    
+    for root, dirs, files in os.walk(directory):
+        # Skip hidden directories and common non-source directories
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in {
+            'node_modules', '__pycache__', 'venv', 'env', '.git',
+            'dist', 'build', 'target', 'out', 'bin', 'obj',
+            'static', 'templates', 'research', 'settings', 'test_example'
+        }]
+        
+        for file in files:
+            if not file.startswith('.'):
+                file_ext = os.path.splitext(file)[1].lower()
+                if file_ext in extensions:
+                    src_files.append(os.path.join(root, file))
+    
+    # Debug logging
+    log.debug(f"find_src_files in {directory}: found {len(src_files)} source files with patterns {file_patterns}")
+    if src_files and len(src_files) > 0:
+        log.debug(f"Sample files found: {src_files[:5]}")
+    
     return src_files
+
+def is_source_file(filepath: str, file_patterns: Optional[List[str]] = None) -> bool:
+    """Check if a file is a source code file based on extensions."""
+    # Default source code extensions
+    default_extensions = {'.py', '.js', '.ts', '.java', '.c', '.cpp', '.h', '.hpp',
+                         '.go', '.rs', '.rb', '.php', '.swift', '.scala', '.kt'}
+    
+    # Use provided patterns or default to source extensions
+    if file_patterns:
+        extensions = {ext.lower() for ext in file_patterns if ext.startswith('.')}
+    else:
+        extensions = default_extensions
+    
+    file_ext = os.path.splitext(filepath)[1].lower()
+    return file_ext in extensions
 
 # Configure logging
 log = logging.getLogger()
@@ -47,6 +97,8 @@ async def repo_map(
     mentioned_idents: Optional[List[str]] = None,
     verbose: bool = False,
     max_context_window: Optional[int] = None,
+    file_patterns: Optional[List[str]] = None,
+    scan_directories: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """Generate a repository map for the specified files, providing a list of function prototypes and variables for files as well as relevant related
     files. Provide filenames relative to the project_root. In addition to the files provided, relevant related files will also be included with a
@@ -90,18 +142,33 @@ async def repo_map(
     mentioned_fnames_set = set(mentioned_files) if mentioned_files else None
     mentioned_idents_set = set(mentioned_idents) if mentioned_idents else None
 
-    # 2. If a specific list of other_files isn't provided, scan the whole root directory.
-    # This should happen regardless of whether chat_files are present.
+    # 2. If a specific list of other_files isn't provided, scan specified directories or root
     effective_other_files = []
     if other_files:
         effective_other_files = other_files
     else:
-        log.info("No other_files provided, scanning root directory for context...")
-        effective_other_files = find_src_files(project_root)
+        # Use specified directories or default to project root
+        directories_to_scan = scan_directories or [project_root]
+        log.info(f"No other_files provided, scanning directories: {directories_to_scan}")
+        
+        for directory in directories_to_scan:
+            abs_directory = str(Path(project_root) / directory) if directory != project_root else project_root
+            if os.path.exists(abs_directory):
+                files_in_dir = find_src_files(abs_directory, file_patterns)
+                effective_other_files.extend(files_in_dir)
+                log.info(f"Found {len(files_in_dir)} source files in {directory}")
+            else:
+                log.warning(f"Directory not found: {abs_directory}")
 
-    # Add a print statement for debugging so you can see what the tool is working with.
-    log.debug(f"Chat files: {chat_files_list}")
-    log.debug(f"Effective other_files count: {len(effective_other_files)}")
+    # Enhanced debugging information
+    if verbose:
+        log.info(f"Project root: {project_root}")
+        log.info(f"Chat files: {chat_files_list}")
+        log.info(f"File patterns: {file_patterns or 'default source extensions'}")
+        log.info(f"Scan directories: {scan_directories or ['project root']}")
+        log.info(f"Effective other_files count: {len(effective_other_files)}")
+        if effective_other_files:
+            log.info(f"Sample files found: {effective_other_files[:5]}")
 
     # If after all that we have no files, we can exit early.
     if not chat_files_list and not effective_other_files:
@@ -197,8 +264,8 @@ async def search_identifiers(
             exclude_unranked=True
         )
 
-        # Find all source files in the project
-        all_files = find_src_files(project_root)
+        # Find all source files in the project with enhanced filtering
+        all_files = find_src_files(project_root, ['.py', '.js', '.ts', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs', '.rb', '.php', '.swift', '.scala', '.kt'])
         
         # Get all tags (definitions and references) for all files
         all_tags = []

@@ -234,23 +234,37 @@ class RepoMap:
             return []
         
         try:
+            # Parse the code with Tree-sitter
             tree = parser.parse(bytes(code, "utf-8"))
+            
+            if tree.root_node is None or tree.root_node.has_error:
+                self.output_handlers['warning'](f"Tree-sitter parsing failed for {rel_fname}, attempting regex fallback")
+                tags = self._regex_fallback(code, rel_fname, fname, lang)
+                self.output_handlers['info'](f"Regex fallback for {rel_fname}: {len(tags)} tags found")
+                return tags
             
             # Load query from SCM file
             try:
                 query_text = read_text(scm_fname)
                 if not query_text:
                     self.output_handlers['warning'](f"Empty SCM file: {scm_fname}")
-                    return []
+                    tags = self._regex_fallback(code, rel_fname, fname, lang)
+                    self.output_handlers['info'](f"Regex fallback for {rel_fname}: {len(tags)} tags found")
+                    return tags
             except Exception as e:
                 self.output_handlers['error'](f"Error reading SCM file {scm_fname}: {e}")
-                return []
+                tags = self._regex_fallback(code, rel_fname, fname, lang)
+                self.output_handlers['info'](f"Regex fallback for {rel_fname}: {len(tags)} tags found")
+                return tags
 
             try:
                 query = language.query(query_text)
             except Exception as e:
                 self.output_handlers['error'](f"Error creating query from {scm_fname}: {e}")
-                return []
+                tags = self._regex_fallback(code, rel_fname, fname, lang)
+                self.output_handlers['info'](f"Regex fallback for {rel_fname}: {len(tags)} tags found")
+                return tags
+            
             # Use QueryCursor for modern tree-sitter API
             from tree_sitter import QueryCursor
             qcursor = QueryCursor(query)
@@ -283,38 +297,70 @@ class RepoMap:
                             kind=kind
                         ))
 
-            # If tree-sitter fails, fallback to regex for common languages
+            # If tree-sitter fails, fallback to regex
             if not tags:
                 self.output_handlers['warning'](f"Tree-sitter found no tags for {rel_fname}, attempting regex fallback")
-                import re
-                patterns = {
-                    'python': r'^\s*(def|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)',
-                    'javascript': r'^\s*(function|class)\s+([a-zA-Z_$][0-9a-zA-Z_$]*)',
-                    'java': r'^\s*(public|private|protected)\s+[\w<>]+\s+([a-zA-Z_$][a-zA-Z\d_$]*)\([^)]*\)\s*\{?',
-                    'ruby': r'^\s*(def|class|module)\s+([a-zA-Z_][0-9a-zA-Z_]*(?:::[a-zA-Z_][0-9a-zA-Z_]*)*)'
-                }
-                
-                pattern = patterns.get(lang)
-                if pattern:
-                    for i, line in enumerate(code.splitlines()):
-                        match = re.match(pattern, line)
-                        if match:
-                            tags.append(Tag(
-                                rel_fname=rel_fname,
-                                fname=fname,
-                                line=i + 1,
-                                name=match.group(2),
-                                kind="def"
-                            ))
-                    if tags:
-                        self.output_handlers['info'](f"Regex fallback found {len(tags)} definitions in {rel_fname}")
+                tags = self._regex_fallback(code, rel_fname, fname, lang)
+                self.output_handlers['info'](f"Regex fallback for {rel_fname}: {len(tags)} tags found")
+                return tags
             
+            self.output_handlers['info'](f"Tree-sitter successfully parsed {rel_fname}: {len(tags)} tags found")
             return tags
             
         except Exception as e:
             self.output_handlers['error'](f"Error parsing {fname}: {e}")
-            return []
+            tags = self._regex_fallback(code, rel_fname, fname, lang)
+            self.output_handlers['info'](f"Regex fallback for {rel_fname}: {len(tags)} tags found")
+            return tags
     
+    def _regex_fallback(self, code: str, rel_fname: str, fname: str, lang: str) -> List[Tag]:
+        """Fallback to regex parsing when Tree-sitter fails."""
+        import re
+        patterns = {
+            'python': [
+                (r'^\s*(def)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', "def"),  # Function definitions
+                (r'^\s*(class)\s+([a-zA-Z_][a-zA-Z0-9_]*)', "def"),     # Class definitions
+                (r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=', "def"),           # Variable assignments
+                (r'^\s*(from|import)\s+([a-zA-Z_][a-zA-Z0-9_.]*)', "ref"),  # Imports
+            ],
+            'javascript': [
+                (r'^\s*(function|class)\s+([a-zA-Z_$][0-9a-zA-Z_$]*)', "def"),
+                (r'^\s*(const|let|var)\s+([a-zA-Z_$][0-9a-zA-Z_$]*)', "def"),
+                (r'^\s*([a-zA-Z_$][0-9a-zA-Z_$]*)\s*\(', "ref"),
+            ],
+            'java': [
+                (r'^\s*(public|private|protected)\s+[\w<>]+\s+([a-zA-Z_$][a-zA-Z\d_$]*)\([^)]*\)\s*\{?', "def"),
+                (r'^\s*class\s+([a-zA-Z_$][a-zA-Z\d_$]*)', "def"),
+            ],
+            'ruby': [
+                (r'^\s*(def|class|module)\s+([a-zA-Z_][0-9a-zA-Z_]*(?:::[a-zA-Z_][0-9a-zA-Z_]*)*)', "def"),
+            ]
+        }
+        
+        tags = []
+        lang_patterns = patterns.get(lang, [])
+        
+        for i, line in enumerate(code.splitlines()):
+            for pattern, kind in lang_patterns:
+                match = re.search(pattern, line)
+                if match:
+                    # Get the identifier name from the appropriate capture group
+                    name = match.group(2) if len(match.groups()) >= 2 else match.group(1)
+                    if name:
+                        tags.append(Tag(
+                            rel_fname=rel_fname,
+                            fname=fname,
+                            line=i + 1,
+                            name=name,
+                            kind=kind
+                        ))
+                        break  # Only match one pattern per line
+        
+        if tags:
+            self.output_handlers['info'](f"Regex fallback found {len(tags)} tags in {rel_fname}")
+        
+        return tags
+
     def get_ranked_tags(
         self,
         chat_fnames: List[str],
