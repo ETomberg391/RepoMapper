@@ -3,6 +3,7 @@ import json
 import os
 import logging
 import argparse
+import fnmatch
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Set
 import dataclasses
@@ -13,9 +14,50 @@ from utils import count_tokens, read_text
 from scm import get_scm_fname
 from importance import filter_important_files
 
-# Enhanced file filtering with configurable patterns
+def parse_gitignore(directory: str) -> List[str]:
+    """Parse .gitignore file and return list of patterns to exclude."""
+    gitignore_path = os.path.join(directory, '.gitignore')
+    patterns = []
+    
+    if os.path.exists(gitignore_path):
+        try:
+            with open(gitignore_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    # Skip empty lines and comments
+                    if line and not line.startswith('#'):
+                        patterns.append(line)
+        except Exception as e:
+            log.warning(f"Error reading .gitignore file {gitignore_path}: {e}")
+    
+    return patterns
+
+def should_exclude_from_gitignore(file_path: str, gitignore_patterns: List[str], root_dir: str) -> bool:
+    """Check if a file should be excluded based on .gitignore patterns."""
+    if not gitignore_patterns:
+        return False
+    
+    # Get relative path from root directory
+    try:
+        rel_path = os.path.relpath(file_path, root_dir)
+    except ValueError:
+        return False
+    
+    for pattern in gitignore_patterns:
+        # Handle directory patterns (ending with /)
+        if pattern.endswith('/'):
+            dir_pattern = pattern.rstrip('/')
+            if fnmatch.fnmatch(rel_path, dir_pattern) or fnmatch.fnmatch(rel_path, pattern + '*'):
+                return True
+        # Handle regular file patterns
+        elif fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(os.path.basename(file_path), pattern):
+            return True
+    
+    return False
+
+# Enhanced file filtering with configurable patterns and .gitignore support
 def find_src_files(directory: str, file_patterns: Optional[List[str]] = None) -> List[str]:
-    """Find source files in a directory with proper filtering.
+    """Find source files in a directory with proper filtering, including .gitignore support.
     
     Args:
         directory: Directory to search
@@ -37,6 +79,11 @@ def find_src_files(directory: str, file_patterns: Optional[List[str]] = None) ->
     else:
         extensions = default_extensions
     
+    # Parse .gitignore patterns
+    gitignore_patterns = parse_gitignore(directory)
+    if gitignore_patterns:
+        log.debug(f"Found {len(gitignore_patterns)} .gitignore patterns: {gitignore_patterns}")
+    
     src_files = []
     
     for root, dirs, files in os.walk(directory):
@@ -47,11 +94,22 @@ def find_src_files(directory: str, file_patterns: Optional[List[str]] = None) ->
             'static', 'templates', 'research', 'settings', 'test_example'
         }]
         
+        # Also exclude directories based on .gitignore patterns
+        dirs[:] = [d for d in dirs if not should_exclude_from_gitignore(
+            os.path.join(root, d), gitignore_patterns, directory
+        )]
+        
         for file in files:
             if not file.startswith('.'):
+                file_path = os.path.join(root, file)
+                
+                # Check .gitignore exclusion
+                if should_exclude_from_gitignore(file_path, gitignore_patterns, directory):
+                    continue
+                
                 file_ext = os.path.splitext(file)[1].lower()
                 if file_ext in extensions:
-                    src_files.append(os.path.join(root, file))
+                    src_files.append(file_path)
     
     # Debug logging
     log.debug(f"find_src_files in {directory}: found {len(src_files)} source files with patterns {file_patterns}")
@@ -191,7 +249,7 @@ async def repo_map(
             root=str(root_path),
             token_counter_func=lambda text: count_tokens(text, "gpt-4"),
             file_reader_func=read_text,
-            output_handler_funcs={'info': log.info, 'warning': log.warning, 'error': log.error},
+            output_handler_funcs={'info': log.info, 'warning': log.warning, 'error': log.error, 'debug': log.debug},
             verbose=verbose,
             exclude_unranked=exclude_unranked,
             max_context_window=max_context_window
@@ -259,7 +317,7 @@ async def search_identifiers(
             root=project_root,
             token_counter_func=lambda text: count_tokens(text, "gpt-4"),
             file_reader_func=read_text,
-            output_handler_funcs={'info': log.info, 'warning': log.warning, 'error': log.error},
+            output_handler_funcs={'info': log.info, 'warning': log.warning, 'error': log.error, 'debug': log.debug},
             verbose=False,
             exclude_unranked=True
         )

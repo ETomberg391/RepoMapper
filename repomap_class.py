@@ -31,7 +31,7 @@ class FileReport:
 # Constants
 CACHE_VERSION = 1
 
-TAGS_CACHE_DIR = os.path.join(os.getcwd(), f".repomap.tags.cache.v{CACHE_VERSION}")
+TAGS_CACHE_DIR = f".repomap.tags.cache.v{CACHE_VERSION}"
 SQLITE_ERRORS = (sqlite3.OperationalError, sqlite3.DatabaseError)
 
 # Tag namedtuple for storing parsed code definitions and references
@@ -73,8 +73,13 @@ class RepoMap:
             output_handler_funcs = {
                 'info': print,
                 'warning': print,
-                'error': print
+                'error': print,
             }
+        
+        # Ensure a debug handler always exists to prevent KeyErrors
+        if 'debug' not in output_handler_funcs:
+            output_handler_funcs['debug'] = lambda x: None  # No-op
+            
         self.output_handlers = output_handler_funcs
         
         # Initialize caches
@@ -166,11 +171,13 @@ class RepoMap:
                 cached_entry = self.TAGS_CACHE.get(fname)
                 
             if cached_entry and cached_entry.get("mtime") == file_mtime:
+                self.output_handlers['debug'](f"Using cached tags for {rel_fname}")
                 return cached_entry["data"]
         except SQLITE_ERRORS:
             self.tags_cache_error()
         
         # Cache miss or file changed
+        self.output_handlers['debug'](f"Cache miss for {rel_fname}, parsing file")
         tags = self.get_tags_raw(fname, rel_fname)
         
         try:
@@ -182,6 +189,7 @@ class RepoMap:
     
     def get_tags_raw(self, fname: str, rel_fname: str) -> List[Tag]:
         """Parse file to extract tags using Tree-sitter."""
+        self.output_handlers['debug'](f"Starting get_tags_raw for {rel_fname}")
         try:
             from grep_ast import filename_to_lang
             from grep_ast.tsl import get_language, get_parser
@@ -191,6 +199,7 @@ class RepoMap:
             sys.exit(1)
             
         lang = filename_to_lang(fname)
+        self.output_handlers['debug'](f"Detected language for {fname}: {lang}")
         if not lang:
             self.output_handlers['info'](f"Language not supported for {fname}")
             return []
@@ -235,6 +244,7 @@ class RepoMap:
         
         try:
             # Parse the code with Tree-sitter
+            self.output_handlers['debug'](f"Attempting Tree-sitter parsing for {rel_fname}")
             tree = parser.parse(bytes(code, "utf-8"))
             
             if tree.root_node is None or tree.root_node.has_error:
@@ -298,6 +308,7 @@ class RepoMap:
                         ))
 
             # If tree-sitter fails, fallback to regex
+            self.output_handlers['debug'](f"Tree-sitter parsing completed for {rel_fname}, found {len(tags)} tags")
             if not tags:
                 self.output_handlers['warning'](f"Tree-sitter found no tags for {rel_fname}, attempting regex fallback")
                 tags = self._regex_fallback(code, rel_fname, fname, lang)
@@ -309,6 +320,8 @@ class RepoMap:
             
         except Exception as e:
             self.output_handlers['error'](f"Error parsing {fname}: {e}")
+            import traceback
+            self.output_handlers['debug'](f"Full traceback: {traceback.format_exc()}")
             tags = self._regex_fallback(code, rel_fname, fname, lang)
             self.output_handlers['info'](f"Regex fallback for {rel_fname}: {len(tags)} tags found")
             return tags
@@ -318,22 +331,28 @@ class RepoMap:
         import re
         patterns = {
             'python': [
-                (r'^\s*(def)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', "def"),  # Function definitions
-                (r'^\s*(class)\s+([a-zA-Z_][a-zA-Z0-9_]*)', "def"),     # Class definitions
-                (r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=', "def"),           # Variable assignments
-                (r'^\s*(from|import)\s+([a-zA-Z_][a-zA-Z0-9_.]*)', "ref"),  # Imports
+                # Function definitions - match def function_name(...
+                (r'^\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', "def", 1),
+                # Class definitions - match class ClassName(...
+                (r'^\s*class\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\(|:)', "def", 1),
+                # Variable assignments - match variable = value
+                (r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?!\d)', "def", 1),
+                # Import statements - match import module or from module import name
+                (r'^\s*(?:from\s+([a-zA-Z_][a-zA-Z0-9_.]*)\s+import|import\s+([a-zA-Z_][a-zA-Z0-9_.]*))', "ref", 1),
+                # Function calls - match function_name(...
+                (r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', "ref", 1),
             ],
             'javascript': [
-                (r'^\s*(function|class)\s+([a-zA-Z_$][0-9a-zA-Z_$]*)', "def"),
-                (r'^\s*(const|let|var)\s+([a-zA-Z_$][0-9a-zA-Z_$]*)', "def"),
-                (r'^\s*([a-zA-Z_$][0-9a-zA-Z_$]*)\s*\(', "ref"),
+                (r'^\s*(?:function|class)\s+([a-zA-Z_$][0-9a-zA-Z_$]*)', "def", 1),
+                (r'^\s*(?:const|let|var)\s+([a-zA-Z_$][0-9a-zA-Z_$]*)', "def", 1),
+                (r'^\s*([a-zA-Z_$][0-9a-zA-Z_$]*)\s*\(', "ref", 1),
             ],
             'java': [
-                (r'^\s*(public|private|protected)\s+[\w<>]+\s+([a-zA-Z_$][a-zA-Z\d_$]*)\([^)]*\)\s*\{?', "def"),
-                (r'^\s*class\s+([a-zA-Z_$][a-zA-Z\d_$]*)', "def"),
+                (r'^\s*(?:public|private|protected)\s+[\w<>]+\s+([a-zA-Z_$][a-zA-Z\d_$]*)\([^)]*\)\s*\{?', "def", 1),
+                (r'^\s*class\s+([a-zA-Z_$][a-zA-Z\d_$]*)', "def", 1),
             ],
             'ruby': [
-                (r'^\s*(def|class|module)\s+([a-zA-Z_][0-9a-zA-Z_]*(?:::[a-zA-Z_][0-9a-zA-Z_]*)*)', "def"),
+                (r'^\s*(?:def|class|module)\s+([a-zA-Z_][0-9a-zA-Z_]*(?:::[a-zA-Z_][0-9a-zA-Z_]*)*)', "def", 1),
             ]
         }
         
@@ -341,11 +360,21 @@ class RepoMap:
         lang_patterns = patterns.get(lang, [])
         
         for i, line in enumerate(code.splitlines()):
-            for pattern, kind in lang_patterns:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue  # Skip empty lines and comments
+                
+            for pattern, kind, group_num in lang_patterns:
                 match = re.search(pattern, line)
                 if match:
-                    # Get the identifier name from the appropriate capture group
-                    name = match.group(2) if len(match.groups()) >= 2 else match.group(1)
+                    # Extract the identifier name from the appropriate capture group
+                    name = None
+                    for g in range(1, match.lastindex + 1 if match.lastindex else 1):
+                        candidate = match.group(g)
+                        if candidate and candidate not in ['from', 'import']:  # Skip keywords
+                            name = candidate
+                            break
+                    
                     if name:
                         tags.append(Tag(
                             rel_fname=rel_fname,
@@ -358,6 +387,8 @@ class RepoMap:
         
         if tags:
             self.output_handlers['info'](f"Regex fallback found {len(tags)} tags in {rel_fname}")
+        else:
+            self.output_handlers['warning'](f"Regex fallback found 0 tags in {rel_fname}")
         
         return tags
 
