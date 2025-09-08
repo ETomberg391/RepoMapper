@@ -48,6 +48,6 @@ fi
 
 # Launch the RepoMap server in the foreground with debug flag
 log "Launching RepoMap server... (Press Ctrl+C to shut down)"
-python repomap_server.py --debug "$@"
+python repomap_server.py --debug --auto-cache --project-root . "$@"
 
 log "Server process has finished."

@@ -4,6 +4,8 @@ RepoMap class for generating repository maps.
 
 import os
 import sys
+import json
+import hashlib
 from pathlib import Path
 from collections import namedtuple, defaultdict
 from typing import List, Dict, Set, Optional, Tuple, Callable, Any, Union
@@ -86,6 +88,7 @@ class RepoMap:
         self.tree_cache = {}
         self.tree_context_cache = {}
         self.map_cache = {}
+        self.cache_path = self.root / ".repomap_cache.json"
         
         # Load persistent tags cache
         self.load_tags_cache()
@@ -693,20 +696,45 @@ class RepoMap:
         
         return best_tree, file_report
     
+    def _get_source_files_hash(self, all_files: List[str]) -> str:
+        """Compute a hash for all source files."""
+        hasher = hashlib.sha1()
+        for fname in sorted(all_files):
+            try:
+                with open(fname, "rb") as f:
+                    hasher.update(f.read())
+            except IOError:
+                continue  # Ignore files that can't be read
+        return hasher.hexdigest()
+
     def get_repo_map(
         self,
         chat_files: List[str] = None,
         other_files: List[str] = None,
         mentioned_fnames: Optional[Set[str]] = None,
         mentioned_idents: Optional[Set[str]] = None,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        auto_mode: bool = False
     ) -> Tuple[Optional[str], FileReport]:
         """Generate the repository map with file report."""
         if chat_files is None:
             chat_files = []
         if other_files is None:
             other_files = []
-            
+
+        all_files = sorted(list(set(chat_files + other_files)))
+        current_hash = self._get_source_files_hash(all_files)
+
+        if not force_refresh and self.cache_path.exists():
+            try:
+                with open(self.cache_path, "r") as f:
+                    cached_data = json.load(f)
+                if cached_data.get("hash") == current_hash:
+                    self.output_handlers['info']("Returning cached repository map.")
+                    return cached_data.get("map"), FileReport(**cached_data.get("report"))
+            except (json.JSONDecodeError, IOError) as e:
+                self.output_handlers['warning'](f"Could not read cache file: {e}")
+
         # Create empty report for error cases
         empty_report = FileReport({}, 0, 0, 0)
         
@@ -725,9 +753,9 @@ class RepoMap:
         
         try:
             # get_ranked_tags_map returns (map_string, file_report)
-            map_string, file_report = self.get_ranked_tags_map(
+            map_string, file_report = self.get_ranked_tags_map_uncached(
                 chat_files, other_files, max_map_tokens,
-                mentioned_fnames, mentioned_idents, force_refresh
+                mentioned_fnames, mentioned_idents
             )
         except RecursionError:
             self.output_handlers['error']("Disabling repo map, git repo too large?")
@@ -751,5 +779,16 @@ class RepoMap:
             repo_content = ""
         
         repo_content += map_string
+
+        # Save to cache
+        try:
+            with open(self.cache_path, "w") as f:
+                json.dump({
+                    "hash": current_hash,
+                    "map": repo_content,
+                    "report": file_report.__dict__
+                }, f)
+        except IOError as e:
+            self.output_handlers['warning'](f"Could not write to cache file: {e}")
         
         return repo_content, file_report

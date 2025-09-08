@@ -383,6 +383,8 @@ async def search_identifiers(
 def main():
     parser = argparse.ArgumentParser(description="RepoMap MCP Server")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--auto-cache", action="store_true", help="Automatically pre-cache the repository map on startup.")
+    parser.add_argument("--project-root", default=".", help="Project root for auto-caching.")
     args = parser.parse_args()
 
     # Configure logging based on debug flag
@@ -394,6 +396,20 @@ def main():
         logging.basicConfig(level=logging.INFO)
         logging.getLogger('fastmcp').setLevel(logging.ERROR)
         logging.getLogger('fastmcp.server').setLevel(logging.ERROR)
+
+    if args.auto_cache:
+        log.info("Auto-caching enabled. Pre-caching repository map...")
+        try:
+            root_path = Path(args.project_root).resolve()
+            repo_mapper = RepoMap(
+                root=str(root_path),
+                output_handler_funcs={'info': log.info, 'warning': log.warning, 'error': log.error, 'debug': log.debug},
+            )
+            all_files = find_src_files(str(root_path))
+            repo_mapper.get_repo_map(other_files=all_files, auto_mode=True)
+            log.info("Repository map has been pre-cached.")
+        except Exception as e:
+            log.error(f"Failed to pre-cache repository map: {e}")
 
     # Run the MCP server
     log.info("Starting FastMCP server...")

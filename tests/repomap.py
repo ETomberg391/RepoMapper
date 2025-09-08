@@ -10,6 +10,7 @@ Uses Tree-sitter for parsing and PageRank for ranking importance.
 import argparse
 import os
 import sys
+import json
 from pathlib import Path
 from typing import List
 
@@ -138,6 +139,12 @@ Examples:
         action="store_true",
         help="Exclude files with Page Rank 0 from the map"
     )
+
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Run in fully automatic mode, ignoring other file inputs and using cache."
+    )
     
     args = parser.parse_args()
     
@@ -152,30 +159,36 @@ Examples:
         'error': tool_error
     }
     
-    # Process file arguments
-    chat_files_from_args = args.chat_files or [] # These are the paths as strings from the CLI
-    
-    # Determine the list of unresolved path specifications that will form the 'other_files'
-    # These can be files or directories. find_src_files will expand them.
-    unresolved_paths_for_other_files_specs = []
-    if args.other_files:  # If --other-files is explicitly provided, it's the source
-        unresolved_paths_for_other_files_specs.extend(args.other_files)
-    elif args.paths:  # Else, if positional paths are given, they are the source
-        unresolved_paths_for_other_files_specs.extend(args.paths)
-    # If neither, unresolved_paths_for_other_files_specs remains empty.
-
-    # Now, expand all directory paths in unresolved_paths_for_other_files_specs into actual file lists
-    # and collect all file paths. find_src_files handles both files and directories.
-    effective_other_files_unresolved = []
-    for path_spec_str in unresolved_paths_for_other_files_specs:
-        effective_other_files_unresolved.extend(find_src_files(path_spec_str))
-    
-    # Convert to absolute paths
     root_path = Path(args.root).resolve()
-    # chat_files for RepoMap are from --chat-files argument, resolved.
-    chat_files = [str(Path(f).resolve()) for f in chat_files_from_args]
-    # other_files for RepoMap are the effective_other_files, resolved after expansion.
-    other_files = [str(Path(f).resolve()) for f in effective_other_files_unresolved]
+
+    if args.auto:
+        tool_output("Running in automatic mode...")
+        chat_files = []
+        other_files = [str(Path(p).resolve()) for p in find_src_files(str(root_path))]
+    else:
+        # Process file arguments
+        chat_files_from_args = args.chat_files or [] # These are the paths as strings from the CLI
+        
+        # Determine the list of unresolved path specifications that will form the 'other_files'
+        # These can be files or directories. find_src_files will expand them.
+        unresolved_paths_for_other_files_specs = []
+        if args.other_files:  # If --other-files is explicitly provided, it's the source
+            unresolved_paths_for_other_files_specs.extend(args.other_files)
+        elif args.paths:  # Else, if positional paths are given, they are the source
+            unresolved_paths_for_other_files_specs.extend(args.paths)
+        # If neither, unresolved_paths_for_other_files_specs remains empty.
+
+        # Now, expand all directory paths in unresolved_paths_for_other_files_specs into actual file lists
+        # and collect all file paths. find_src_files handles both files and directories.
+        effective_other_files_unresolved = []
+        for path_spec_str in unresolved_paths_for_other_files_specs:
+            effective_other_files_unresolved.extend(find_src_files(path_spec_str))
+        
+        # Convert to absolute paths
+        # chat_files for RepoMap are from --chat-files argument, resolved.
+        chat_files = [str(Path(f).resolve()) for f in chat_files_from_args]
+        # other_files for RepoMap are the effective_other_files, resolved after expansion.
+        other_files = [str(Path(f).resolve()) for f in effective_other_files_unresolved]
 
     print(f"Chat files: {chat_files}")
     
@@ -197,20 +210,39 @@ Examples:
     
     # Generate the map
     try:
-        map_content = repo_map.get_repo_map(
+        map_content, report = repo_map.get_repo_map(
             chat_files=chat_files,
             other_files=other_files,
             mentioned_fnames=mentioned_fnames,
             mentioned_idents=mentioned_idents,
-            force_refresh=args.force_refresh
+            force_refresh=args.force_refresh,
+            auto_mode=args.auto
         )
         
         if map_content:
-            if args.verbose:
-                tokens = repo_map.token_count(map_content)
-                tool_output(f"Generated map: {len(map_content)} chars, ~{tokens} tokens")
-            
-            tool_output(*map_content)
+            if args.auto:
+                # In auto mode, save JSON and print a summary
+                json_output_path = root_path / "repomap.json"
+                try:
+                    with open(json_output_path, "w") as f:
+                        json.dump({
+                            "map": map_content,
+                            "report": report.__dict__
+                        }, f, indent=2)
+                    tool_output(f"Full JSON map saved to {json_output_path}")
+                except IOError as e:
+                    tool_error(f"Could not write JSON output: {e}")
+                
+                # Print a summary to the console
+                tool_output("\n--- RepoMap Summary ---")
+                tool_output(map_content.split('---')[0]) # Heuristic to get summary
+            else:
+                # Default behavior: print the full map
+                if args.verbose:
+                    tokens = repo_map.token_count(map_content)
+                    tool_output(f"Generated map: {len(map_content)} chars, ~{tokens} tokens")
+                
+                tool_output(map_content)
         else:
             tool_output("No repository map generated.")
             
