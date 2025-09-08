@@ -251,33 +251,37 @@ class RepoMap:
             except Exception as e:
                 self.output_handlers['error'](f"Error creating query from {scm_fname}: {e}")
                 return []
-            captures = query.captures(tree.root_node)
+            # Use QueryCursor for modern tree-sitter API
+            from tree_sitter import QueryCursor
+            qcursor = QueryCursor(query)
+            matches = qcursor.matches(tree.root_node)
+            
             if self.verbose:
-                self.output_handlers['debug'](f"Tree-sitter found {len(captures)} captures in {rel_fname}")
-                for i, (node, name) in enumerate(captures[:5]):
-                    self.output_handlers['debug'](f"Capture {i+1}: {name} @ {node.start_point}")
+                self.output_handlers['debug'](f"Tree-sitter found matches in {rel_fname}")
             
             tags = []
-            # Process captures, which is a list of (node, name) tuples
-            for node, capture_name in captures:
-                if "name.definition" in capture_name:
-                    kind = "def"
-                elif "name.reference" in capture_name:
-                    kind = "ref"
-                else:
-                    # Skip other capture types
-                    continue
-                
-                line_num = node.start_point[0] + 1
-                name = node.text.decode('utf-8') if node.text else ""
-                
-                tags.append(Tag(
-                    rel_fname=rel_fname,
-                    fname=fname,
-                    line=line_num,
-                    name=name,
-                    kind=kind
-                ))
+            # Process matches and captures
+            for pattern_index, captures_dict in matches:
+                for capture_name, nodes in captures_dict.items():
+                    for node in nodes:
+                        if "name.definition" in capture_name:
+                            kind = "def"
+                        elif "name.reference" in capture_name:
+                            kind = "ref"
+                        else:
+                            # Skip other capture types
+                            continue
+                        
+                        line_num = node.start_point[0] + 1
+                        name = node.text.decode('utf-8') if node.text else ""
+                        
+                        tags.append(Tag(
+                            rel_fname=rel_fname,
+                            fname=fname,
+                            line=line_num,
+                            name=name,
+                            kind=kind
+                        ))
 
             # If tree-sitter fails, fallback to regex for common languages
             if not tags:
