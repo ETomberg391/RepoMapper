@@ -13,7 +13,6 @@ from utils import Tag
 from dataclasses import dataclass
 import diskcache
 import networkx as nx
-import diskcache
 from grep_ast import TreeContext
 from utils import count_tokens, read_text, Tag
 from scm import get_scm_fname
@@ -31,7 +30,6 @@ class FileReport:
 
 # Constants
 CACHE_VERSION = 1
-import os
 
 TAGS_CACHE_DIR = os.path.join(os.getcwd(), f".repomap.tags.cache.v{CACHE_VERSION}")
 SQLITE_ERRORS = (sqlite3.OperationalError, sqlite3.DatabaseError)
@@ -187,12 +185,14 @@ class RepoMap:
         try:
             from grep_ast import filename_to_lang
             from grep_ast.tsl import get_language, get_parser
+            from tree_sitter import QueryCursor
         except ImportError:
             print("Error: grep-ast is required. Install with: pip install grep-ast")
             sys.exit(1)
             
         lang = filename_to_lang(fname)
         if not lang:
+            self.output_handlers['info'](f"Language not supported for {fname}")
             return []
         
         try:
@@ -200,12 +200,35 @@ class RepoMap:
             parser = get_parser(lang)
         except Exception as err:
             self.output_handlers['error'](f"Skipping file {fname}: {err}")
-            return []
+            return [Tag(
+                rel_fname=rel_fname,
+                fname=fname,
+                line=0,
+                name=f"parser-error: {err}",
+                kind="error"
+            )]
         
+        # Get absolute path to SCM query file
         scm_fname = get_scm_fname(lang)
         if not scm_fname:
+            self.output_handlers['info'](f"No SCM file found for language {lang}")
             return []
         
+        # Try multiple locations for SCM files
+        scm_locations = [
+            Path(__file__).parent.parent / "queries" / f"{lang}-tags.scm",
+            Path(__file__).parent / "queries" / f"{lang}-tags.scm",
+            Path(scm_fname)
+        ]
+        
+        for scm_path in scm_locations:
+            if scm_path.exists():
+                scm_fname = str(scm_path)
+                break
+        else:
+            self.output_handlers['warning'](f"SCM file not found for {lang} at {scm_locations}")
+            return []
+
         code = self.read_text_func_internal(fname)
         if not code:
             return []
@@ -214,36 +237,73 @@ class RepoMap:
             tree = parser.parse(bytes(code, "utf-8"))
             
             # Load query from SCM file
-            query_text = read_text(scm_fname, silent=True)
-            if not query_text:
+            try:
+                query_text = read_text(scm_fname)
+                if not query_text:
+                    self.output_handlers['warning'](f"Empty SCM file: {scm_fname}")
+                    return []
+            except Exception as e:
+                self.output_handlers['error'](f"Error reading SCM file {scm_fname}: {e}")
                 return []
-            
-            query = language.query(query_text)
+
+            try:
+                query = language.query(query_text)
+            except Exception as e:
+                self.output_handlers['error'](f"Error creating query from {scm_fname}: {e}")
+                return []
             captures = query.captures(tree.root_node)
+            if self.verbose:
+                self.output_handlers['debug'](f"Tree-sitter found {len(captures)} captures in {rel_fname}")
+                for i, (node, name) in enumerate(captures[:5]):
+                    self.output_handlers['debug'](f"Capture {i+1}: {name} @ {node.start_point}")
             
             tags = []
-            # Process captures as a dictionary
-            for capture_name, nodes in captures.items():
-                for node in nodes:
-                    if "name.definition" in capture_name:
-                        kind = "def"
-                    elif "name.reference" in capture_name:
-                        kind = "ref"
-                    else:
-                        # Skip other capture types like 'reference.call' if not needed for tagging
-                        continue 
-                    
-                    line_num = node.start_point[0] + 1
-                    # Handle potential None value
-                    name = node.text.decode('utf-8') if node.text else ""
-                    
-                    tags.append(Tag(
-                        rel_fname=rel_fname,
-                        fname=fname,
-                        line=line_num,
-                        name=name,
-                        kind=kind
-                    ))
+            # Process captures, which is a list of (node, name) tuples
+            for node, capture_name in captures:
+                if "name.definition" in capture_name:
+                    kind = "def"
+                elif "name.reference" in capture_name:
+                    kind = "ref"
+                else:
+                    # Skip other capture types
+                    continue
+                
+                line_num = node.start_point[0] + 1
+                name = node.text.decode('utf-8') if node.text else ""
+                
+                tags.append(Tag(
+                    rel_fname=rel_fname,
+                    fname=fname,
+                    line=line_num,
+                    name=name,
+                    kind=kind
+                ))
+
+            # If tree-sitter fails, fallback to regex for common languages
+            if not tags:
+                self.output_handlers['warning'](f"Tree-sitter found no tags for {rel_fname}, attempting regex fallback")
+                import re
+                patterns = {
+                    'python': r'^\s*(def|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)',
+                    'javascript': r'^\s*(function|class)\s+([a-zA-Z_$][0-9a-zA-Z_$]*)',
+                    'java': r'^\s*(public|private|protected)\s+[\w<>]+\s+([a-zA-Z_$][a-zA-Z\d_$]*)\([^)]*\)\s*\{?',
+                    'ruby': r'^\s*(def|class|module)\s+([a-zA-Z_][0-9a-zA-Z_]*(?:::[a-zA-Z_][0-9a-zA-Z_]*)*)'
+                }
+                
+                pattern = patterns.get(lang)
+                if pattern:
+                    for i, line in enumerate(code.splitlines()):
+                        match = re.match(pattern, line)
+                        if match:
+                            tags.append(Tag(
+                                rel_fname=rel_fname,
+                                fname=fname,
+                                line=i + 1,
+                                name=match.group(2),
+                                kind="def"
+                            ))
+                    if tags:
+                        self.output_handlers['info'](f"Regex fallback found {len(tags)} definitions in {rel_fname}")
             
             return tags
             
@@ -261,7 +321,7 @@ class RepoMap:
         """Get ranked tags using PageRank algorithm with file report."""
         # Return empty list and empty report if no files
         if not chat_fnames and not other_fnames:
-            return [], FileReport([], {}, 0, 0, 0)
+            return [], FileReport(excluded={}, definition_matches=0, reference_matches=0, total_files_considered=0)
             
         # Initialize file report early
         included: List[str] = []
@@ -344,11 +404,9 @@ class RepoMap:
         
         # Run PageRank
         try:
-            if personalization:
-                ranks = nx.pagerank(G, personalization=personalization, alpha=0.85)
-            else:
-                ranks = {node: 1.0 for node in G.nodes()}
-        except:
+            ranks = nx.pagerank(G, personalization=personalization if personalization else None, alpha=0.85)
+        except Exception as e:
+            self.output_handlers['error'](f"Error running PageRank: {e}")
             # Fallback to uniform ranking
             ranks = {node: 1.0 for node in G.nodes()}
         

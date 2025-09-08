@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import logging
+import argparse
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Set
 import dataclasses
@@ -24,25 +25,9 @@ def find_src_files(directory: str) -> List[str]:
                 src_files.append(os.path.join(r, f))
     return src_files
 
-# Configure logging - only show errors
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.ERROR)
+# Configure logging
+log = logging.getLogger()
 
-# Create console handler for errors only
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.ERROR)
-console_formatter = logging.Formatter('%(levelname)-5s %(asctime)-15s %(name)s:%(funcName)s:%(lineno)d - %(message)s')
-console_handler.setFormatter(console_formatter)
-root_logger.addHandler(console_handler)
-
-# Suppress FastMCP logs
-fastmcp_logger = logging.getLogger('fastmcp')
-fastmcp_logger.setLevel(logging.ERROR)
-# Suppress server startup message
-server_logger = logging.getLogger('fastmcp.server')
-server_logger.setLevel(logging.ERROR)
-
-log = logging.getLogger(__name__)
 
 # Set global stateless_http setting
 settings.stateless_http = True
@@ -55,7 +40,7 @@ async def repo_map(
     project_root: str,
     chat_files: Optional[List[str]] = None,
     other_files: Optional[List[str]] = None,
-    token_limit: Any = 8192,  # Accept any type to handle empty strings
+    token_limit: Any = 2048,  # Accept any type to handle empty strings
     exclude_unranked: bool = False,
     force_refresh: bool = False,
     mentioned_files: Optional[List[str]] = None,
@@ -70,7 +55,7 @@ async def repo_map(
     :param project_root: Root directory of the project to search.  (must be an absolute path!)
     :param chat_files: A list of file paths that are currently in the chat context. These files will receive the highest ranking.
     :param other_files: A list of other relevant file paths in the repository to consider for the map. They receive a lower ranking boost than mentioned_files and chat_files.
-    :param token_limit: The maximum number of tokens the generated repository map should occupy. Defaults to 8192.
+    :param token_limit: The maximum number of tokens the generated repository map should occupy. Defaults to 2048.
     :param exclude_unranked: If True, files with a PageRank of 0.0 will be excluded from the map. Defaults to False.
     :param force_refresh: If True, forces a refresh of the repository map cache. Defaults to False.
     :param mentioned_files: Optional list of file paths explicitly mentioned in the conversation and receive a mid-level ranking boost.
@@ -93,13 +78,13 @@ async def repo_map(
     # 1. Handle and validate parameters
     # Convert token_limit to integer with fallback
     try:
-        token_limit = int(token_limit) if token_limit else 8192
+        token_limit = int(token_limit) if token_limit else 2048
     except (TypeError, ValueError):
-        token_limit = 8192
+        token_limit = 2048
     
     # Ensure token_limit is positive
     if token_limit <= 0:
-        token_limit = 8192
+        token_limit = 2048
     
     chat_files_list = chat_files or []
     mentioned_fnames_set = set(mentioned_files) if mentioned_files else None
@@ -271,9 +256,26 @@ async def search_identifiers(
 
 # --- Main Entry Point ---
 def main():
+    parser = argparse.ArgumentParser(description="RepoMap MCP Server")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
+
+    # Configure logging based on debug flag
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG, format='%(levelname)-5s %(asctime)-15s %(name)s:%(funcName)s:%(lineno)d - %(message)s')
+        logging.getLogger('fastmcp').setLevel(logging.INFO)
+        logging.getLogger('fastmcp.server').setLevel(logging.INFO)
+    else:
+        logging.basicConfig(level=logging.INFO)
+        logging.getLogger('fastmcp').setLevel(logging.ERROR)
+        logging.getLogger('fastmcp.server').setLevel(logging.ERROR)
+
     # Run the MCP server
-    log.debug("Starting FastMCP server...")
-    mcp.run()
+    log.info("Starting FastMCP server...")
+    try:
+        mcp.run()
+    except KeyboardInterrupt:
+        print("\nServer shutting down gracefully.")
 
 if __name__ == "__main__":
     main()

@@ -210,7 +210,7 @@ Examples:
                 tokens = repo_map.token_count(map_content)
                 tool_output(f"Generated map: {len(map_content)} chars, ~{tokens} tokens")
             
-            print(map_content)
+            tool_output(*map_content)
         else:
             tool_output("No repository map generated.")
             
