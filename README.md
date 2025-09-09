@@ -91,9 +91,10 @@ importance.py:
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+chmod +x run_server.sh
+./run_server.sh
 ```
-
+This is a wrapper that will check for venv environment for the project. If the venv isn't there, it will attempt to create one, pip install the requirements.txt, update the pip installs, and then run the repomap_server.py script to start the MCP server. Once the venv is created you can also "source venv/bin/activate" to activate the environment to then run the basic usages below.
 ----------
 
 ## Usage
@@ -281,10 +282,10 @@ RepoMap can also be run as an MCP (Model Context Protocol) server, allowing othe
 
 ### Usage
 
-1. Run the `repomap_server.py` script:
+1. Run the `./run_server.sh` script:
 
 ```bash
-python repomap_server.py
+./run_server.sh
 ```
 
 2. The server will start and listen for requests via STDIO.
